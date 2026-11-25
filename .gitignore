@@ -1,0 +1,7 @@
+# Build products and runtime logs
+*.o
+*.a
+*.exe
+*.dll
+hc-err.txt
+hc-out.txt

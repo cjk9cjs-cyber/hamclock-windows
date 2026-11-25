@@ -1,0 +1,1218 @@
+package org.openhamclock.hamclock
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.DialogInterface
+import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.location.Location
+import android.location.LocationManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.view.KeyEvent
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.view.WindowManager
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.net.Uri
+import android.os.Message
+import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.widget.ProgressBar
+import android.widget.TextView
+import android.view.inputmethod.EditorInfo
+import androidx.activity.addCallback
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.net.wifi.WifiManager
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.text.Editable
+import android.text.TextWatcher
+import android.widget.Toast
+import java.io.File
+import java.net.Socket
+import java.util.concurrent.Executors
+
+class MainActivity : AppCompatActivity() {
+
+    private val TAG = "HamClockActivity"
+    private val PREFS_NAME = "hamclock_prefs"
+    private val PREF_BACKEND_HOST = "backend_host"
+    private val PREF_FORCE_SETUP = "force_setup"
+    private val PREF_RESTART_COUNTDOWN = "restart_countdown"
+    private val PREF_START_ON_BOOT = "start_on_boot"
+    private val PREF_ALLOW_EXTERNAL = "allow_external_access"
+    private val PREF_MDNS_NAME = "mdns_name"
+    private val PREF_RUN_IN_BACKGROUND = "run_in_background"
+    private val PREF_AUTO_UPDATE = "auto_update_enabled"
+    private val PREF_TV_OVERSCAN = "tv_overscan"
+    private val PREF_LOCATION_DISCLOSURE_SEEN = "location_disclosure_seen"
+
+    private val DEFAULT_REST_PORT = 8080
+    private val DEFAULT_RW_PORT = 8081
+    private val DEFAULT_RO_PORT = 8082
+
+    internal var actualRestPort = 8080
+    internal var actualRwPort = 8081
+    internal var actualRoPort = 8082
+    internal var restPortConflict = false
+    private var rwPortConflict = false
+    internal var isExplicitExit = false
+
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var nsdManager: NsdManager? = null
+    private var nsdRegistrationListener: NsdManager.RegistrationListener? = null
+    private var mdnsResponder: MdnsResponder? = null
+    internal var registeredMdnsName: String? = null
+    internal var mdnsState: MdnsResponder.MdnsState = MdnsResponder.MdnsState.OFF
+    internal var mdnsHost: String = ""
+    internal var onMdnsStatusChanged: ((MdnsResponder.MdnsState, String) -> Unit)? = null
+
+    internal lateinit var webView: WebView
+    private lateinit var progressBar: ProgressBar
+    private lateinit var statusText: TextView
+    internal lateinit var btnSettings: ImageButton
+    private lateinit var loadingContainer: LinearLayout
+    private lateinit var errorContainer: LinearLayout
+    private lateinit var btnCleanRestart: Button
+    private lateinit var btnErrorSettings: Button
+    @Volatile private var isEmbedVisible = false
+    internal lateinit var appUpdateHelper: AppUpdateHelper
+
+    private var settingsPanelController: SettingsPanelController? = null
+    val isSettingsDialogOpen: Boolean
+        get() = settingsPanelController?.isShowing == true
+
+    fun onAutoUpdateSettingChanged(enabled: Boolean) {
+        settingsPanelController?.onAutoUpdateSettingChanged(enabled)
+    }
+
+    private val executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var isDpadCenterLongPressed = false
+    private val dpadCenterLongPressRunnable = Runnable {
+        if (!isSettingsDialogOpen) {
+            isDpadCenterLongPressed = true
+            showBackendSettingsDialog()
+        }
+    }
+
+    private var isBackendStarted = false
+    private var locationDisclosureDialog: AlertDialog? = null
+
+    private val locationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        if (!isBackendStarted) {
+            startNativeBackend()
+        } else {
+            settingsPanelController?.onLocationPermissionResult()
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        hideSystemUI()
+
+        webView = findViewById(R.id.hamclock_webview)
+        progressBar = findViewById(R.id.progress_bar)
+        statusText = findViewById(R.id.status_text)
+        btnSettings = findViewById(R.id.btn_settings)
+        loadingContainer = findViewById(R.id.loading_container)
+        errorContainer = findViewById(R.id.error_container)
+        btnCleanRestart = findViewById(R.id.btn_clean_restart)
+        btnErrorSettings = findViewById(R.id.btn_error_settings)
+
+        btnCleanRestart.setOnClickListener {
+            Log.i(TAG, "User requested Clean Restart from error screen")
+            killLingeringHamClockZombies()
+            RestartActivity.restart(this)
+        }
+        btnErrorSettings.setOnClickListener {
+            showBackendSettingsDialog()
+        }
+
+        btnSettings.setOnClickListener {
+            showBackendSettingsDialog()
+        }
+        btnSettings.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) {
+                btnSettings.alpha = 1.0f
+                btnSettings.animate().scaleX(1.15f).scaleY(1.15f).setDuration(150).start()
+            } else {
+                btnSettings.alpha = 0.8f
+                btnSettings.animate().scaleX(1.0f).scaleY(1.0f).setDuration(150).start()
+            }
+        }
+
+        setupWebView()
+
+        val initialOverscan = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(PREF_TV_OVERSCAN, 0)
+        applyOverscanMargin(initialOverscan)
+
+        onBackPressedDispatcher.addCallback(this) {
+            if (isFireTvOrTv()) {
+                val currentUrl = webView.url
+                if (currentUrl != null && !currentUrl.contains("live.html") && webView.canGoBack()) {
+                    webView.goBack()
+                } else if (!isSettingsDialogOpen) {
+                    showBackendSettingsDialog()
+                }
+            } else {
+                performAppExitOrBackground()
+            }
+        }
+
+        HamClockNative.setAppControlListener(object : HamClockNative.AppControlListener {
+            override fun onExitRequested() {
+                mainHandler.post {
+                    Log.i(TAG, "Exit requested by native HamClock engine")
+                    isExplicitExit = true
+                    finishAndRemoveTask()
+                }
+            }
+
+            override fun onRestartRequested(minusK: Boolean) {
+                mainHandler.post {
+                    Log.i(TAG, "Restart requested by native HamClock engine (minusK=$minusK)")
+                    if (!minusK) {
+                        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        prefs.edit().putBoolean(PREF_RESTART_COUNTDOWN, true).commit()
+                    }
+                    restartApp()
+                }
+            }
+
+            override fun onOpenUrlRequested(url: String) {
+                mainHandler.post {
+                    openExternalUrl(url)
+                }
+            }
+
+            override fun getClipboardText(): String {
+                return try {
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    val clip = clipboard?.primaryClip
+                    if (clip != null && clip.itemCount > 0) {
+                        clip.getItemAt(0).coerceToText(this@MainActivity)?.toString() ?: ""
+                    } else ""
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error accessing clipboard: ${e.message}")
+                    ""
+                }
+            }
+        })
+
+        appUpdateHelper = AppUpdateHelper(this)
+        appUpdateHelper.start()
+
+        // Check or request location permissions in compliance with Google Play Developer Policy:
+        // 1. If permission already granted -> start native backend immediately.
+        // 2. If first run without permission -> show prominent disclosure dialog explaining
+        //    that location is used strictly on-device for astronomical & grid calculations.
+        // 3. If disclosure was previously seen and user declined/skipped -> start immediately
+        //    without interrupting cold launch.
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val locationDisclosureSeen = prefs.getBoolean(PREF_LOCATION_DISCLOSURE_SEEN, false)
+
+        if (hasLocationPermission()) {
+            startNativeBackend()
+        } else if (!locationDisclosureSeen) {
+            showLocationDisclosureDialog()
+        } else {
+            startNativeBackend()
+        }
+    }
+
+    internal fun isCallsignSet(): Boolean {
+        val eepromFile = File(File(filesDir, "hamclock_data"), "eeprom")
+        if (!eepromFile.exists() || eepromFile.length() < 100) return false
+        return try {
+            val callsign = StringBuilder()
+            var cookieOk = false
+            eepromFile.useLines { lines ->
+                for (line in lines) {
+                    val parts = line.trim().split(" ")
+                    if (parts.size >= 2) {
+                        val addr = parts[0].toIntOrNull(16)
+                        val byteVal = parts[1].toIntOrNull(16)
+                        if (addr != null && byteVal != null) {
+                            if (addr == 0x0EF && byteVal == 0x5A) {
+                                cookieOk = true
+                            } else if (cookieOk && addr in 0x0F0..0x0FB && byteVal in 33..126) {
+                                callsign.append(byteVal.toChar())
+                            } else if (addr > 0x0FB) {
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+            cookieOk && callsign.isNotEmpty()
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    internal fun isFireTvOrTv(): Boolean {
+        val pm = packageManager
+        val hasFireTvFeature = pm.hasSystemFeature("amazon.hardware.fire_tv")
+        val isLeanback = pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+        val uiModeManager = getSystemService(Context.UI_MODE_SERVICE) as? android.app.UiModeManager
+        val isUiTv = uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
+        return isTvDevice(hasFireTvFeature, Build.MODEL, isLeanback, isUiTv)
+    }
+
+    companion object {
+        fun isTvDevice(
+            hasFireTvFeature: Boolean,
+            model: String?,
+            isLeanback: Boolean,
+            isUiTv: Boolean
+        ): Boolean {
+            val isAmazonFireTv = hasFireTvFeature || (model?.startsWith("AFT", ignoreCase = true) == true)
+            return isAmazonFireTv || isLeanback || isUiTv
+        }
+    }
+
+    private fun performAppExitOrBackground() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val runInBackground = prefs.getBoolean(PREF_RUN_IN_BACKGROUND, false)
+        if (runInBackground) {
+            Log.i(TAG, "Run in background enabled - moving task to back on Back press")
+            moveTaskToBack(true)
+        } else {
+            finish()
+        }
+    }
+
+    internal fun applyOverscanMargin(percent: Int) {
+        val effectivePercent = if (isFireTvOrTv()) percent else 0
+        val displayMetrics = resources.displayMetrics
+        val widthPx = displayMetrics.widthPixels
+        val heightPx = displayMetrics.heightPixels
+        val marginH = (widthPx * (effectivePercent / 100.0f)).toInt()
+        val marginV = (heightPx * (effectivePercent / 100.0f)).toInt()
+
+        val params = webView.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (params.leftMargin != marginH || params.topMargin != marginV) {
+            params.setMargins(marginH, marginV, marginH, marginV)
+            webView.layoutParams = params
+            webView.requestLayout()
+            webView.postDelayed({
+                webView.evaluateJavascript(
+                    "(function() { if (typeof runSoon === 'function' && typeof getFullImage === 'function') { runSoon(getFullImage); } else { window.dispatchEvent(new Event('resize')); } })();",
+                    null
+                )
+            }, 100)
+        }
+    }
+
+    private fun getSelectedBackendHost(): String {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(PREF_BACKEND_HOST, getString(R.string.backend_default))
+            ?: getString(R.string.backend_default)
+    }
+
+    fun showBackendSettingsDialog(isFirstRunTv: Boolean = false) {
+        if (isSettingsDialogOpen) {
+            Log.d(TAG, "Settings dialog already open; ignoring duplicate show request")
+            return
+        }
+        if (settingsPanelController == null) {
+            settingsPanelController = SettingsPanelController(this)
+        }
+        settingsPanelController?.show(startOnTvSetup = isFirstRunTv)
+    }
+
+    internal fun clearHamClockCache(dataDir: File) {
+        if (!dataDir.exists() || !dataDir.isDirectory) return
+        val files = dataDir.listFiles() ?: return
+        for (file in files) {
+            // Keep eeprom file which holds the config, saved configuration profiles, and persistent MAC address
+            if (file.name == "eeprom" || file.name == ".mac_address" || file.name == "configurations") {
+                continue
+            }
+            try {
+                if (file.isDirectory) {
+                    file.deleteRecursively()
+                } else {
+                    file.delete()
+                }
+                Log.i(TAG, "Cleared cache item: ${file.name}")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to delete cache item ${file.name}: ${e.message}")
+            }
+        }
+    }
+
+    internal fun restartApp() {
+        RestartActivity.restart(this)
+    }
+
+    internal fun hasLocationPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED || ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    internal fun requestLocationPermission() {
+        locationPermissionLauncher.launch(
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            )
+        )
+    }
+
+    private fun showLocationDisclosureDialog() {
+        if (isFinishing || isDestroyed) return
+
+        val dialogView = layoutInflater.inflate(R.layout.dialog_location_disclosure, null)
+        val btnUseLocation = dialogView.findViewById<Button>(R.id.btn_use_location)
+        val btnManual = dialogView.findViewById<Button>(R.id.btn_manual_location)
+
+        val builder = AlertDialog.Builder(this, R.style.Theme_HamClock_SettingsDialog)
+        builder.setView(dialogView)
+        builder.setCancelable(false)
+
+        val dlg = builder.create()
+        locationDisclosureDialog = dlg
+
+        fun applyFocusZoom(view: View) {
+            view.setOnFocusChangeListener { v, hasFocus ->
+                if (hasFocus) {
+                    v.translationZ = 8f
+                    v.animate().scaleX(1.04f).scaleY(1.04f).setDuration(120).start()
+                } else {
+                    v.translationZ = 0f
+                    v.animate().scaleX(1.0f).scaleY(1.0f).setDuration(120).start()
+                }
+            }
+        }
+
+        applyFocusZoom(btnUseLocation)
+        applyFocusZoom(btnManual)
+
+        btnUseLocation.setOnClickListener {
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(PREF_LOCATION_DISCLOSURE_SEEN, true).apply()
+            dlg.dismiss()
+            requestLocationPermission()
+        }
+
+        btnManual.setOnClickListener {
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(PREF_LOCATION_DISCLOSURE_SEEN, true).apply()
+            dlg.dismiss()
+            startNativeBackend()
+        }
+
+        dlg.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                prefs.edit().putBoolean(PREF_LOCATION_DISCLOSURE_SEEN, true).apply()
+                dlg.dismiss()
+                startNativeBackend()
+                true
+            } else {
+                false
+            }
+        }
+
+        dlg.show()
+        btnUseLocation.post {
+            btnUseLocation.requestFocus()
+        }
+    }
+
+    private fun getHostLocation(): Pair<Double, Double>? {
+        if (!hasLocationPermission()) return null
+
+        val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
+        var bestLocation: Location? = null
+
+        for (provider in lm.getProviders(true)) {
+            try {
+                val loc = lm.getLastKnownLocation(provider) ?: continue
+                if (bestLocation == null || loc.accuracy < bestLocation.accuracy) {
+                    bestLocation = loc
+                }
+            } catch (e: SecurityException) {
+                Log.w(TAG, "Location permission error: ${e.message}")
+            }
+        }
+
+        return bestLocation?.let { Pair(it.latitude, it.longitude) }
+    }
+
+
+    private fun hideSystemUI() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            window.insetsController?.let { controller ->
+                controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            or View.SYSTEM_UI_FLAG_FULLSCREEN
+                    )
+        }
+    }
+
+    private fun openExternalUrl(url: String) {
+        try {
+            val uri = Uri.parse(url)
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            Log.i(TAG, "Opened external URL: $url")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open URL $url: ${e.message}")
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun setupWebView() {
+        webView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            useWideViewPort = true
+            loadWithOverviewMode = true
+            cacheMode = WebSettings.LOAD_NO_CACHE
+            mediaPlaybackRequiresUserGesture = false
+            setSupportZoom(false)
+            javaScriptCanOpenWindowsAutomatically = true
+            setSupportMultipleWindows(true)
+            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        }
+
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        webView.setBackgroundColor(0xFF000000.toInt())
+
+        webView.addJavascriptInterface(object {
+            @JavascriptInterface
+            fun openUrl(url: String) {
+                mainHandler.post {
+                    openExternalUrl(url)
+                }
+            }
+
+            @JavascriptInterface
+            fun setEmbedVisible(visible: Boolean) {
+                isEmbedVisible = visible
+                Log.i(TAG, "isEmbedVisible updated: $visible")
+            }
+
+            @JavascriptInterface
+            fun getClipboardText(): String {
+                var text = ""
+                val latch = java.util.concurrent.CountDownLatch(1)
+                mainHandler.post {
+                    try {
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        val clip = clipboard?.primaryClip
+                        if (clip != null && clip.itemCount > 0) {
+                            text = clip.getItemAt(0).coerceToText(this@MainActivity)?.toString() ?: ""
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error accessing clipboard from JS: ${e.message}")
+                    } finally {
+                        latch.countDown()
+                    }
+                }
+                try {
+                    latch.await(1, java.util.concurrent.TimeUnit.SECONDS)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Timeout waiting for clipboard in JS interface")
+                }
+                return text
+            }
+
+            @JavascriptInterface
+            fun openSettings() {
+                mainHandler.post {
+                    btnSettings.performClick()
+                }
+            }
+
+            @JavascriptInterface
+            fun focusSettings() {
+                mainHandler.post {
+                    btnSettings.requestFocus()
+                }
+            }
+
+            @JavascriptInterface
+            fun setSettingsHover(isHovered: Boolean) {
+                mainHandler.post {
+                    if (!btnSettings.isFocused) {
+                        if (isHovered) {
+                            btnSettings.alpha = 1.0f
+                            btnSettings.animate().scaleX(1.15f).scaleY(1.15f).setDuration(150).start()
+                        } else {
+                            btnSettings.alpha = 0.8f
+                            btnSettings.animate().scaleX(1.0f).scaleY(1.0f).setDuration(150).start()
+                        }
+                    }
+                }
+            }
+        }, "AndroidApp")
+
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message?
+            ): Boolean {
+                val href = view?.handler?.obtainMessage()
+                view?.requestFocusNodeHref(href)
+                val url = href?.data?.getString("url")
+                if (!url.isNullOrEmpty()) {
+                    openExternalUrl(url)
+                    return true
+                }
+                return false
+            }
+
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                Log.d("HamClockJS", "${consoleMessage?.message()} -- line ${consoleMessage?.lineNumber()}")
+                return true
+            }
+        }
+
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                progressBar.visibility = View.GONE
+                statusText.visibility = View.GONE
+                webView.visibility = View.VISIBLE
+
+                view?.evaluateJavascript(
+                    """
+                    (function() {
+                        window.open = function(url, target, features) {
+                            if (window.AndroidApp && window.AndroidApp.openUrl) {
+                                window.AndroidApp.openUrl(url);
+                                return { close: function() {}, closed: false, focus: function() {} };
+                            }
+                            return null;
+                        };
+                    })();
+                    """.trimIndent(),
+                    null
+                )
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                super.onReceivedError(view, request, error)
+                Log.w(TAG, "WebView error: ${error?.description}")
+            }
+        }
+    }
+
+    private fun startNativeBackend() {
+        val dataDir = File(filesDir, "hamclock_data")
+        if (!dataDir.exists()) {
+            dataDir.mkdirs()
+        }
+
+        statusText.text = getString(R.string.starting_engine)
+
+        executor.execute {
+            if (!HamClockNative.isDaemonRunning()) {
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val forceSetup = prefs.getBoolean(PREF_FORCE_SETUP, false)
+                if (forceSetup) {
+                    prefs.edit().putBoolean(PREF_FORCE_SETUP, false).apply()
+                    Log.i(TAG, "Starting native backend with forceSetup=true (direct to Setup)")
+                }
+
+                val countdownSetup = prefs.getBoolean(PREF_RESTART_COUNTDOWN, false)
+                if (countdownSetup) {
+                    prefs.edit().putBoolean(PREF_RESTART_COUNTDOWN, false).apply()
+                    Log.i(TAG, "Starting native backend with countdownSetup=true (10s countdown clock)")
+                }
+
+                val backendHost = getSelectedBackendHost()
+                val location = getHostLocation()
+
+                val hasLocation = location != null
+                val lat = location?.first ?: 0.0
+                val lng = location?.second ?: 0.0
+
+                val allowExternal = prefs.getBoolean(PREF_ALLOW_EXTERNAL, false)
+                HamClockNative.setAllowExternalAccess(allowExternal)
+                val mdnsName = prefs.getString(PREF_MDNS_NAME, "")
+
+                mainHandler.post {
+                    updateMdnsService(allowExternal, mdnsName)
+                    if (allowExternal) {
+                        acquireWifiLock()
+                    } else {
+                        releaseWifiLock()
+                    }
+                }
+
+                val (selectedRwPort, rwConflict) = findAvailableRwPort(DEFAULT_RW_PORT)
+                actualRwPort = selectedRwPort
+                rwPortConflict = rwConflict
+
+                val selectedRoPort = findAvailableRoPort(DEFAULT_RO_PORT)
+                actualRoPort = selectedRoPort
+
+                val (selectedRestPort, conflict) = findAvailableRestPort(DEFAULT_REST_PORT)
+                actualRestPort = selectedRestPort
+                restPortConflict = conflict
+
+                if (rwConflict) {
+                    mainHandler.post {
+                        Toast.makeText(this@MainActivity, getString(R.string.rw_port_conflict_toast, actualRwPort), Toast.LENGTH_LONG).show()
+                    }
+                }
+
+                if (conflict) {
+                    mainHandler.post {
+                        val msg = if (actualRestPort > 0) {
+                            getString(R.string.rest_port_conflict_toast, actualRestPort)
+                        } else {
+                            getString(R.string.rest_port_disabled_toast)
+                        }
+                        Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+                    }
+                }
+
+                Log.i(TAG, "Launching native HamClock in ${dataDir.absolutePath} (hasLocation=$hasLocation, lat=$lat, lng=$lng, backend=$backendHost, forceSetup=$forceSetup, countdownSetup=$countdownSetup, allowExternal=$allowExternal, rwPort=$actualRwPort, roPort=$actualRoPort, restPort=$actualRestPort, rwConflict=$rwConflict, restConflict=$conflict)")
+                HamClockNative.startDaemon(
+                    dataDir = dataDir.absolutePath,
+                    rwPort = actualRwPort,
+                    roPort = actualRoPort,
+                    restPort = actualRestPort,
+                    backendHost = backendHost,
+                    hasLocation = hasLocation,
+                    lat = lat,
+                    lng = lng,
+                    forceSetup = forceSetup,
+                    countdownSetup = countdownSetup
+                )
+            }
+
+
+            // Wait for local HTTP/WebSocket port to become available
+            waitForServerReady()
+        }
+    }
+
+    internal fun killLingeringHamClockZombies() {
+        val myPid = android.os.Process.myPid()
+        try {
+            val procDir = File("/proc")
+            val files = procDir.listFiles() ?: return
+            for (file in files) {
+                val pid = file.name.toIntOrNull() ?: continue
+                if (pid != myPid && pid > 0) {
+                    try {
+                        Log.w(TAG, "Terminating orphaned HamClock process PID $pid")
+                        android.os.Process.killProcess(pid)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Could not terminate process $pid: ${e.message}")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error checking /proc for orphaned processes: ${e.message}")
+        }
+    }
+
+    private fun findAvailableRwPort(preferredPort: Int): Pair<Int, Boolean> {
+        if (preferredPort > 0 && isPortAvailable(preferredPort)) {
+            return Pair(preferredPort, false)
+        }
+
+        // Port is occupied. First, terminate any orphaned zombies belonging to our UID
+        killLingeringHamClockZombies()
+        try {
+            Thread.sleep(250)
+        } catch (_: InterruptedException) {}
+
+        if (isPortAvailable(preferredPort)) {
+            Log.i(TAG, "Port $preferredPort freed after killing orphaned process")
+            return Pair(preferredPort, false)
+        }
+
+        // Port remains occupied (used by an external process). Fall back to alternate ports.
+        val fallbacks = listOf(8083, 8084, 8086, 8091)
+        for (port in fallbacks) {
+            if (isPortAvailable(port)) {
+                Log.w(TAG, "Port $preferredPort is in use by external app. Using fallback port $port")
+                return Pair(port, true)
+            }
+        }
+        Log.w(TAG, "Neither port $preferredPort nor fallback ports were available.")
+        return Pair(preferredPort, true)
+    }
+
+    private fun findAvailableRoPort(preferredPort: Int): Int {
+        if (preferredPort > 0 && isPortAvailable(preferredPort)) {
+            return preferredPort
+        }
+        val fallbacks = listOf(8085, 8087, 8092, 8093)
+        for (port in fallbacks) {
+            if (isPortAvailable(port)) {
+                return port
+            }
+        }
+        return preferredPort
+    }
+
+    private fun findAvailableRestPort(preferredPort: Int): Pair<Int, Boolean> {
+        if (preferredPort > 0 && isPortAvailable(preferredPort)) {
+            return Pair(preferredPort, false)
+        }
+        val fallbacks = listOf(8088, 8085, 8089, 8090)
+        for (port in fallbacks) {
+            if (isPortAvailable(port)) {
+                Log.w(TAG, "Port $preferredPort was in use. Using fallback port $port")
+                return Pair(port, true)
+            }
+        }
+        Log.w(TAG, "Neither port $preferredPort nor fallback ports were available. Disabling REST server (-1).")
+        return Pair(-1, true)
+    }
+
+    private fun isPortAvailable(port: Int): Boolean {
+        return try {
+            java.net.ServerSocket().apply {
+                reuseAddress = true
+                bind(java.net.InetSocketAddress(port))
+                close()
+            }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+
+    private fun waitForServerReady() {
+        var attempts = 0
+        val maxAttempts = 60
+        var isReady = false
+
+        while (attempts < maxAttempts && !isReady) {
+            attempts++
+            try {
+                Socket("127.0.0.1", actualRwPort).use { socket ->
+                    if (socket.isConnected) {
+                        isReady = true
+                        Log.i(TAG, "HamClock server ready on port $actualRwPort after $attempts attempts")
+                    }
+                }
+            } catch (e: Exception) {
+                Thread.sleep(250)
+            }
+        }
+
+        mainHandler.post {
+            if (isReady) {
+                statusText.text = getString(R.string.loading_interface)
+                val targetUrl = "http://127.0.0.1:$actualRwPort/live.html"
+                Log.i(TAG, "Loading URL: $targetUrl")
+                webView.loadUrl(targetUrl)
+
+                if (isFireTvOrTv() && !isCallsignSet()) {
+                    Log.i(TAG, "Fire TV / TV detected with no callsign set: showing first-run setup guide")
+                    showBackendSettingsDialog(isFirstRunTv = true)
+                }
+            } else {
+                loadingContainer.visibility = View.GONE
+                errorContainer.visibility = View.VISIBLE
+                btnCleanRestart.requestFocus()
+            }
+        }
+    }
+
+    internal fun getDeviceIpAddress(): String? {
+        try {
+            val interfaces = java.net.NetworkInterface.getNetworkInterfaces() ?: return null
+            for (iface in interfaces) {
+                if (iface.isLoopback || !iface.isUp) continue
+                for (addr in iface.inetAddresses) {
+                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
+                        return addr.hostAddress
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting device IP: ${e.message}")
+        }
+        return null
+    }
+
+    internal fun updateMdnsService(enable: Boolean, customName: String?) {
+        unregisterMdnsService()
+        if (!enable) return
+
+        val serviceName = MdnsResponder.normalizeBaseName(customName)
+
+        mdnsState = MdnsResponder.MdnsState.PROBING
+        mdnsHost = "$serviceName.local"
+        onMdnsStatusChanged?.invoke(mdnsState, mdnsHost)
+
+        // 1. Start dedicated mDNS A-record responder for direct hostname queries (e.g. <name>.local)
+        mdnsResponder = MdnsResponder(this).apply {
+            onStatusChanged = { state, host ->
+                runOnUiThread {
+                    mdnsState = state
+                    mdnsHost = host
+                    this@MainActivity.onMdnsStatusChanged?.invoke(state, host)
+                }
+            }
+            start(serviceName)
+        }
+
+        // 2. Also register DNS-SD service via Android NsdManager
+        val serviceInfo = NsdServiceInfo().apply {
+            this.serviceName = serviceName
+            this.serviceType = "_http._tcp"
+            this.port = actualRwPort
+        }
+
+        val nsd = getSystemService(Context.NSD_SERVICE) as? NsdManager ?: return
+        nsdManager = nsd
+
+        val listener = object : NsdManager.RegistrationListener {
+            override fun onServiceRegistered(registeredInfo: NsdServiceInfo) {
+                registeredMdnsName = registeredInfo.serviceName
+                Log.i(TAG, "mDNS DNS-SD service registered: ${registeredInfo.serviceName}._http._tcp on port $actualRwPort")
+            }
+
+            override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                Log.w(TAG, "mDNS DNS-SD registration failed: errorCode=$errorCode")
+            }
+
+            override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
+                Log.i(TAG, "mDNS DNS-SD service unregistered")
+                registeredMdnsName = null
+            }
+
+            override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                Log.w(TAG, "mDNS DNS-SD unregistration failed: errorCode=$errorCode")
+            }
+        }
+
+        try {
+            nsd.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, listener)
+            nsdRegistrationListener = listener
+        } catch (e: Exception) {
+            Log.w(TAG, "Error registering mDNS service: ${e.message}")
+        }
+    }
+
+    private fun unregisterMdnsService() {
+        mdnsResponder?.onStatusChanged = null
+        mdnsResponder?.stop()
+        mdnsResponder = null
+        mdnsState = MdnsResponder.MdnsState.OFF
+        mdnsHost = ""
+        onMdnsStatusChanged?.invoke(mdnsState, mdnsHost)
+
+        nsdRegistrationListener?.let { listener ->
+            try {
+                nsdManager?.unregisterService(listener)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error unregistering mDNS service: ${e.message}")
+            }
+        }
+        nsdRegistrationListener = null
+        registeredMdnsName = null
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        hideSystemUI()
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val overscan = prefs.getInt(PREF_TV_OVERSCAN, 0)
+        applyOverscanMargin(overscan)
+        webView.postDelayed({
+            hideSystemUI()
+            webView.evaluateJavascript(
+                "(function() { if (typeof runSoon === 'function' && typeof getFullImage === 'function') { runSoon(getFullImage); } else { window.dispatchEvent(new Event('resize')); } })();",
+                null
+            )
+        }, 300)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            hideSystemUI()
+        }
+    }
+
+    internal fun acquireWifiLock() {
+        if (wifiLock == null) {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            @Suppress("DEPRECATION")
+            wifiLock = wifiManager?.createWifiLock(
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                "HamClock:WifiLock"
+            )?.apply {
+                setReferenceCounted(false)
+                acquire()
+                Log.i(TAG, "Acquired high-performance WifiLock")
+            }
+        }
+    }
+
+    internal fun releaseWifiLock() {
+        wifiLock?.let {
+            if (it.isHeld) {
+                it.release()
+                Log.i(TAG, "Released WifiLock")
+            }
+        }
+        wifiLock = null
+    }
+
+    private fun isCenterOrEnterKey(keyCode: Int): Boolean {
+        return keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                keyCode == KeyEvent.KEYCODE_ENTER ||
+                keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK && isEmbedVisible) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                webView.evaluateJavascript("if (typeof hideEmbed === 'function') hideEmbed();", null)
+            }
+            return true
+        }
+
+        if (isEmbedVisible) {
+            // When embed overlay is showing, allow standard WebView focus navigation for D-pad and Enter
+            return super.dispatchKeyEvent(event)
+        }
+
+        if (errorContainer.visibility == View.VISIBLE) {
+            // When recovery error card is showing, allow standard focus navigation for D-pad on TV
+            return super.dispatchKeyEvent(event)
+        }
+
+        // Quick access remote shortcuts to settings dialog (Menu or Play/Pause)
+        if (event.keyCode == KeyEvent.KEYCODE_MENU || event.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                if (isSettingsDialogOpen) {
+                    settingsPanelController?.dismiss()
+                } else {
+                    showBackendSettingsDialog()
+                }
+            }
+            return true
+        }
+
+        // If settings button is explicitly focused
+        if (btnSettings.isFocused) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                        btnSettings.performClick()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        btnSettings.clearFocus()
+                        webView.requestFocus()
+                        webView.evaluateJavascript("if (typeof handleVirtualCursorMove === 'function') handleVirtualCursorMove('ArrowUp');", null)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        btnSettings.clearFocus()
+                        webView.requestFocus()
+                        webView.evaluateJavascript("if (typeof handleVirtualCursorMove === 'function') handleVirtualCursorMove('ArrowLeft');", null)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_BACK -> {
+                        btnSettings.clearFocus()
+                        webView.requestFocus()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        return true
+                    }
+                }
+            } else if (event.action == KeyEvent.ACTION_UP) {
+                if (isCenterOrEnterKey(event.keyCode)) {
+                    // Consume ACTION_UP on the focused settings button so super.dispatchKeyEvent does not trigger performClick again
+                    return true
+                }
+            }
+            return super.dispatchKeyEvent(event)
+        }
+
+        if (isFireTvOrTv()) {
+            if (isCenterOrEnterKey(event.keyCode)) {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    if (event.repeatCount == 0) {
+                        isDpadCenterLongPressed = false
+                        mainHandler.removeCallbacks(dpadCenterLongPressRunnable)
+                        mainHandler.postDelayed(dpadCenterLongPressRunnable, 500)
+                    }
+                    return true
+                } else if (event.action == KeyEvent.ACTION_UP) {
+                    mainHandler.removeCallbacks(dpadCenterLongPressRunnable)
+                    if (!isDpadCenterLongPressed) {
+                        webView.evaluateJavascript("if (typeof handleVirtualCursorClick === 'function') handleVirtualCursorClick();", null)
+                    }
+                    isDpadCenterLongPressed = false
+                    return true
+                }
+            } else if (event.action == KeyEvent.ACTION_DOWN) {
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        webView.evaluateJavascript("if (typeof handleVirtualCursorMove === 'function') handleVirtualCursorMove('ArrowUp');", null)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        webView.evaluateJavascript("if (typeof handleVirtualCursorMove === 'function') handleVirtualCursorMove('ArrowDown');", null)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        webView.evaluateJavascript("if (typeof handleVirtualCursorMove === 'function') handleVirtualCursorMove('ArrowLeft');", null)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        webView.evaluateJavascript("if (typeof handleVirtualCursorMove === 'function') handleVirtualCursorMove('ArrowRight');", null)
+                        return true
+                    }
+                }
+            }
+        } else {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        webView.evaluateJavascript("if (typeof sendKey === 'function') sendKey('ArrowUp');", null)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        webView.evaluateJavascript("if (typeof sendKey === 'function') sendKey('ArrowDown');", null)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        webView.evaluateJavascript("if (typeof sendKey === 'function') sendKey('ArrowLeft');", null)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        webView.evaluateJavascript("if (typeof sendKey === 'function') sendKey('ArrowRight');", null)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                        webView.evaluateJavascript("if (typeof sendKey === 'function') sendKey('Enter');", null)
+                        return true
+                    }
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onKeyLongPress(keyCode: Int, event: KeyEvent?): Boolean {
+        if (isCenterOrEnterKey(keyCode)) {
+            mainHandler.removeCallbacks(dpadCenterLongPressRunnable)
+            if (!isDpadCenterLongPressed && !isSettingsDialogOpen) {
+                isDpadCenterLongPressed = true
+                showBackendSettingsDialog()
+            }
+            return true
+        }
+        return super.onKeyLongPress(keyCode, event)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        appUpdateHelper.onResume()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == AppUpdateHelper.REQUEST_CODE_FLEXIBLE_UPDATE) {
+            if (resultCode != RESULT_OK) {
+                Log.i(TAG, "Update flow cancelled or failed (resultCode: $resultCode)")
+            }
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        mainHandler.removeCallbacks(dpadCenterLongPressRunnable)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        locationDisclosureDialog?.dismiss()
+        locationDisclosureDialog = null
+        appUpdateHelper.onDestroy()
+        settingsPanelController?.dismiss()
+        settingsPanelController = null
+        mainHandler.removeCallbacks(dpadCenterLongPressRunnable)
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val runInBackground = prefs.getBoolean(PREF_RUN_IN_BACKGROUND, false)
+        HamClockNative.setAppControlListener(null)
+
+        if (isExplicitExit || !runInBackground) {
+            unregisterMdnsService()
+            releaseWifiLock()
+            executor.shutdown()
+            killLingeringHamClockZombies()
+            android.os.Process.killProcess(android.os.Process.myPid())
+        } else {
+            Log.i(TAG, "MainActivity destroyed with run_in_background=true; keeping daemon active in background")
+        }
+    }
+}

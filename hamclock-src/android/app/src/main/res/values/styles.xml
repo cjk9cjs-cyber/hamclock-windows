@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.HamClock" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/black</item>
+        <item name="android:statusBarColor">@color/black</item>
+        <item name="android:navigationBarColor">@color/black</item>
+    </style>
+
+    <style name="Theme.HamClock.Fullscreen" parent="Theme.HamClock">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+
+    <!-- Settings Theme for Overlay / Dialog -->
+    <style name="Theme.HamClock.SettingsDialog" parent="Theme.AppCompat.Dialog">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.60</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+
+    <!-- Settings Typography Styles -->
+    <style name="Settings.Text" parent="android:Widget.TextView">
+        <item name="android:textColor">@color/settings_text</item>
+        <item name="android:fontFamily">sans-serif</item>
+    </style>
+
+    <style name="Settings.Text.Title" parent="Settings.Text">
+        <item name="android:textSize">22sp</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
+    <style name="Settings.Text.Section" parent="Settings.Text">
+        <item name="android:textSize">14sp</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
+    <style name="Settings.Text.Body" parent="Settings.Text">
+        <item name="android:textSize">13sp</item>
+        <item name="android:textColor">@color/settings_text</item>
+    </style>
+
+    <style name="Settings.Text.Meta" parent="Settings.Text">
+        <item name="android:textSize">11sp</item>
+        <item name="android:textColor">@color/settings_muted</item>
+    </style>
+
+    <style name="Settings.Text.Url" parent="Settings.Text">
+        <item name="android:textSize">14sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/settings_accent</item>
+    </style>
+
+    <style name="Settings.Text.UrlAlt" parent="Settings.Text">
+        <item name="android:textSize">12sp</item>
+        <item name="android:textColor">@color/settings_text</item>
+    </style>
+
+    <!-- Settings Button Styles -->
+    <style name="Settings.Button" parent="android:Widget.Button">
+        <item name="android:minHeight">48dp</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+        <item name="android:paddingTop">10dp</item>
+        <item name="android:paddingBottom">10dp</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textColor">@color/settings_btn_text_selector</item>
+        <item name="android:background">@drawable/settings_btn_default_selector</item>
+        <item name="android:focusable">true</item>
+        <item name="android:clickable">true</item>
+    </style>
+
+    <style name="Settings.Button.Toggle" parent="Settings.Button">
+        <item name="android:background">@drawable/settings_btn_toggle_selector</item>
+    </style>
+
+    <style name="Settings.Button.Danger" parent="Settings.Button">
+        <item name="android:textColor">@color/settings_btn_danger_text_selector</item>
+        <item name="android:background">@drawable/settings_btn_danger_selector</item>
+    </style>
+
+    <style name="Settings.Button.Tab" parent="Settings.Button">
+        <item name="android:minHeight">40dp</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">12dp</item>
+        <item name="android:paddingTop">8dp</item>
+        <item name="android:paddingBottom">8dp</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textColor">@color/settings_tab_text_selector</item>
+        <item name="android:background">@drawable/settings_chip_selector</item>
+    </style>
+
+    <style name="Settings.Button.Chip" parent="Settings.Button">
+        <item name="android:minHeight">40dp</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">12dp</item>
+        <item name="android:paddingTop">8dp</item>
+        <item name="android:paddingBottom">8dp</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textColor">@color/settings_tab_text_selector</item>
+        <item name="android:background">@drawable/settings_chip_selector</item>
+    </style>
+
+    <!-- Settings Input Field Style -->
+    <style name="Settings.EditText" parent="android:Widget.EditText">
+        <item name="android:background">@drawable/settings_input_background</item>
+        <item name="android:textColor">@color/settings_text</item>
+        <item name="android:textColorHint">@color/settings_muted</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">12dp</item>
+        <item name="android:paddingTop">10dp</item>
+        <item name="android:paddingBottom">10dp</item>
+        <item name="android:singleLine">true</item>
+    </style>
+
+    <!-- Settings CheckBox Style -->
+    <style name="Settings.CheckBox" parent="android:Widget.CompoundButton.CheckBox">
+        <item name="android:textColor">@color/settings_text</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:buttonTint">@color/settings_accent</item>
+        <item name="android:background">@drawable/settings_checkbox_focus</item>
+        <item name="android:focusable">true</item>
+        <item name="android:clickable">true</item>
+        <item name="android:paddingStart">8dp</item>
+        <item name="android:paddingTop">6dp</item>
+        <item name="android:paddingBottom">6dp</item>
+    </style>
+</resources>

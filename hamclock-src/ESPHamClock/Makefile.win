@@ -1,0 +1,74 @@
+# Native Windows build of the HamClock desktop client.
+#   mingw32-make -f Makefile.win
+#   mingw32-make -f Makefile.win CLOCK=800x480
+
+CLOCK ?= 1600x960
+CXX = g++
+CC = gcc
+AR = ar
+RANLIB = ranlib
+
+ifeq ($(CLOCK),800x480)
+CLOCK_DEF =
+else ifeq ($(CLOCK),1600x960)
+CLOCK_DEF = -D_CLOCK_1600x960
+else ifeq ($(CLOCK),2400x1440)
+CLOCK_DEF = -D_CLOCK_2400x1440
+else ifeq ($(CLOCK),3200x1920)
+CLOCK_DEF = -D_CLOCK_3200x1920
+else
+$(error CLOCK must be 800x480, 1600x960, 2400x1440 or 3200x1920)
+endif
+
+CXXFLAGS := -I"$(CURDIR)/ArduinoLib" -I"$(CURDIR)/wsServer/include" -I"$(CURDIR)/zlib-hc" -I"$(CURDIR)" \
+	-I"$(CURDIR)/win32" -I"$(CURDIR)/win32/compat" \
+	-include "$(CURDIR)/win32/hc_posix.h" \
+	-D_USE_WIN32 $(CLOCK_DEF) -D_USE_MATH_DEFINES -D_WIN32_WINNT=0x0601 \
+	-O2 -std=c++17 -pthread -Wall
+export CXXFLAGS
+
+LDFLAGS := -pthread \
+	-Wl,--wrap,read -Wl,--wrap,write -Wl,--wrap,close \
+	-Wl,--wrap,socket -Wl,--wrap,connect -Wl,--wrap,bind -Wl,--wrap,listen \
+	-Wl,--wrap,accept -Wl,--wrap,shutdown -Wl,--wrap,send -Wl,--wrap,recv \
+	-Wl,--wrap,sendto -Wl,--wrap,recvfrom -Wl,--wrap,setsockopt \
+	-Wl,--wrap,getsockopt -Wl,--wrap,select
+LIBS := -lws2_32 -liphlpapi -lgdi32 -luser32 -lpthread
+
+APP_OBJS = \
+	BME280.o ESPHamClock.o Germano-Bold-16.o Germano-Bold-30.o Germano-Regular-16.o \
+	OTAupdate.o P13.o adif.o adif_parser.o adsbbadge.o activenets.o balloons.o \
+	antenna_lookup.o antennas.o antennas-html.o adif-html.o askmodal.o asknewpos.o \
+	astro.o bandactivity.o nextup.o refsworked.o huntedparks.o parks-html.o bands.o \
+	blinker.o bmp.o borders.o brightness.o cachefile.o callsign.o clocks.o cities.o \
+	color.o configs.o cfg_info.o contests.o cputemp.o dashboard-html.o debug.o \
+	drawextra.o dxcluster.o aprscluster.o dxpeds.o dxpeds_hide.o hamalert.o hamqsl.o \
+	hamsat.o hurricane.o marinewarnings.o firewx.o fires.o quakes.o earthmap.o \
+	earthsat.o eclipsepane.o emetool.o favicon.o fsfree.o gimbal.o gpsd.o grayline.o \
+	kd3tree.o launches.o lightning.o infobox.o iota.o liveweb.o liveweb-html.o \
+	magdecl.o maidenhead.o mapmanage.o menu.o meshtastic.o moon_imgs.o moonpane.o \
+	motd.o ncdxf.o nmea.o nvram.o ontheair.o parsespot.o passwd.o planets.o plot.o \
+	plotmap.o plotmgmnt.o potasched.o prefixes.o pskreporter.o qrcodegen.o qrmodal.o \
+	qrz.o radio.o robinson.o rss.o runner.o santa.o sattool.o satsked.o scrollbar.o \
+	scrollstate.o sdo.o selectFont.o setup.o sevenseg.o spacewx.o sphere.o spots.o \
+	stopwatch.o string.o tooltip.o touch.o tz.o userguide.o version.o webserver.o \
+	wefax.o watchlist.o wifi.o wifimeter.o windbadge.o wx.o xota.o zones.o \
+	win32/win32_fb.o win32/hc_posix.o win32/hc_wrap.o
+
+.PHONY: all clean libs
+
+all: hamclock.exe
+
+libs:
+	$(MAKE) -C ArduinoLib libarduino.a
+	$(MAKE) -C wsServer libws.a
+	$(MAKE) -C zlib-hc libzlib-hc.a
+
+hamclock.exe: $(APP_OBJS) libs
+	$(CXX) -o $@ $(APP_OBJS) -LArduinoLib -LwsServer -Lzlib-hc -larduino -lws -lzlib-hc $(LDFLAGS) $(LIBS)
+
+clean:
+	$(MAKE) -C ArduinoLib clean
+	$(MAKE) -C wsServer clean
+	$(MAKE) -C zlib-hc clean
+	-del /Q *.o win32\*.o hamclock.exe 2>NUL
